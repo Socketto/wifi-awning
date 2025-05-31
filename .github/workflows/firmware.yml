@@ -1,0 +1,48 @@
+name: Build Arduino Sketch for ESP32
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install Arduino CLI
+        run: |
+          wget -qO- https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Linux_64bit.tar.gz | tar xz
+          sudo mv arduino-cli /usr/local/bin/
+          arduino-cli version  # Verifica se Arduino CLI è installato correttamente
+
+      - name: Install ESP32 Core & Libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "WiFi"  # Installa librerie se necessarie
+          arduino-cli lib install "UniversalTelegramBot"  # Installa librerie se necessarie
+          arduino-cli lib install "Adafruit ST7735 and ST7789 Library"  # Installa librerie se necessarie
+          arduino-cli lib install "PubSubClient"  # Installa librerie se necessarie
+          arduino-cli lib install "LiquidCrystal I2C"  # Installa librerie se necessarie
+          
+
+      - name: Compile Sketch
+        run: |
+          mkdir -p build
+          arduino-cli compile --fqbn esp32:esp32:esp32 Firmware/Firmware.ino --export-binaries --output-dir build
+          ls -R
+          
+      - name: Archive build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: build/*.bin
+          if-no-files-found: error # 'warn' or 'ignore' are also available, defaults to `warn`
+        # Carica il file .bin generato dalla compilazione
