@@ -1,18 +1,18 @@
 // Pin configuration
-const int PIN_UP = 12;
-const int PIN_DOWN = 14;
-const int RELAY_POWER = 26;
-const int RELAY_DIRECTION = 27;
-const int ANEMO_PIN = 25;
+const int PIN_UP = 34;
+const int PIN_DOWN = 35;
+const int RELAY_POWER = 23;
+const int RELAY_DIRECTION = 2;
+const int ANEMO_PIN = 13;
 
-const int GREEN_LED = 32;
-const int RED_LED = 33;
+const int GREEN_LED = 27;
+const int RED_LED = 26;//25
 
 // Wind sensor parameters
-volatile unsigned int tickCount = 0;
+volatile unsigned int tickCount = 256;
 unsigned long lastWindCheck = 0;
-const unsigned long WIND_CHECK_INTERVAL = 1000;
-const int WIND_TICK_THRESHOLD = 10;
+const unsigned long WIND_CHECK_INTERVAL = 3000;
+const int WIND_TICK_THRESHOLD = 5;
 
 // Debounce
 unsigned long lastDebounceTimeUP = 0;
@@ -28,9 +28,9 @@ bool windAlarmActive = false;
 unsigned long alarmStartTime = 0;
 bool raisingInProgress = false;
 unsigned long raiseStartTime = 0;
+unsigned short countergreen = 0;
 
-const unsigned long RAISE_TIMEOUT = 60000;
-const unsigned long ALARM_RESET_TIMEOUT = 300000;
+const unsigned long ALARM_RESET_TIMEOUT = 60000; 
 
 // LED blink
 unsigned long lastBlinkTime = 0;
@@ -63,15 +63,16 @@ void loop() {
 
   // --- LED blinking ---
   if (windAlarmActive) {
-    if (currentMillis - lastBlinkTime >= 250) {
+    if (currentMillis - lastBlinkTime >= 100) {
       ledState = !ledState;
       digitalWrite(RED_LED, ledState);
       digitalWrite(GREEN_LED, LOW);
       lastBlinkTime = currentMillis;
     }
   } else {
-    if (currentMillis - lastBlinkTime >= 1000) {
-      ledState = !ledState;
+    if (currentMillis - lastBlinkTime >= 100) {
+      countergreen++;
+      ledState = countergreen % 50 == 0;
       digitalWrite(GREEN_LED, ledState);
       digitalWrite(RED_LED, LOW);
       lastBlinkTime = currentMillis;
@@ -95,16 +96,17 @@ void loop() {
   }
 
   // --- Wind alarm reset ---
-  if (windAlarmActive && currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT) {
-    Serial.println("Wind alarm reset.");
-    windAlarmActive = false;
-  }
-
-  // --- Raise timeout ---
-  if (raisingInProgress && currentMillis - raiseStartTime >= RAISE_TIMEOUT) {
-    Serial.println("Raise timeout. Stopping awning.");
-    stopAwning();
-    raisingInProgress = false;
+  if (windAlarmActive)
+  { 
+    if(currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT) {
+      Serial.println("Wind alarm reset.");
+      raisingInProgress = false;
+      windAlarmActive = false;
+    }
+    else
+    {
+      raiseAwning();
+    }
   }
 
   // --- Button debounce logic ---
@@ -145,31 +147,28 @@ void loop() {
 // --- Relay logic updated to support double-deviator wiring ---
 
 void raiseAwning() {
-  Serial.println("Manual raise.");
+  Serial.println("UP.");
   digitalWrite(RELAY_DIRECTION, LOW);  // Direction: UP
   delay(100);                          // Small delay to settle relays
   digitalWrite(RELAY_POWER, HIGH);    // Power ON
-  raisingInProgress = true;
-  raiseStartTime = millis();
 }
 
 void lowerAwning() {
-  Serial.println("Manual lower.");
+  Serial.println("DOWN.");
   digitalWrite(RELAY_DIRECTION, HIGH); // Direction: DOWN
   delay(100);
   digitalWrite(RELAY_POWER, HIGH);     // Power ON
-  raisingInProgress = false;
 }
 
 void stopAwning() {
   digitalWrite(RELAY_POWER, LOW); // Power OFF
+  delay(100);
+  digitalWrite(RELAY_DIRECTION, LOW); // Direction: DOWN
+  Serial.println("stopAwning");
 }
 
 void retractAwningDueToAlarm() {
-  Serial.println("⚠️ Wind alarm! Retracting awning...");
-  digitalWrite(RELAY_DIRECTION, LOW); // Direction: UP
-  delay(100);
-  digitalWrite(RELAY_POWER, HIGH);    // Power ON
+  Serial.println("Wind alarm! Retracting awning...");
   raisingInProgress = true;
   raiseStartTime = millis();
 }
