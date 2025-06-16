@@ -30,7 +30,8 @@ bool raisingInProgress = false;
 unsigned long raiseStartTime = 0;
 unsigned short countergreen = 0;
 
-const unsigned long ALARM_RESET_TIMEOUT = 60000; 
+const unsigned long ALARM_RESET_TIMEOUT = 60000 * 10; 
+const unsigned long ALARM_STOP_UP_TIMEOUT = 60000; 
 
 // LED blink
 unsigned long lastBlinkTime = 0;
@@ -98,15 +99,23 @@ void loop() {
   // --- Wind alarm reset ---
   if (windAlarmActive)
   { 
+
     if(currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT) {
-      Serial.println("Wind alarm reset.");
+	  Serial.println("Wind alarm reset.");
       raisingInProgress = false;
       windAlarmActive = false;
     }
-    else
-    {
-      raiseAwning();
-    }
+	else
+	{
+		if(currentMillis - alarmStartTime >= ALARM_STOP_UP_TIMEOUT) {
+		  Serial.println("Wind alarm stop UP.");
+		  raisingInProgress = false;
+		}
+		else
+		{
+		  raiseAwning();
+		}
+	}
   }
 
   // --- Button debounce logic ---
