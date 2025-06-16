@@ -67,7 +67,14 @@ void loop() {
     if (currentMillis - lastBlinkTime >= 100) {
       ledState = !ledState;
       digitalWrite(RED_LED, ledState);
+      if(raisingInProgress)
+      {
       digitalWrite(GREEN_LED, LOW);
+      }
+      else
+      {
+      digitalWrite(GREEN_LED, ledState);
+      }
       lastBlinkTime = currentMillis;
     }
   } else {
