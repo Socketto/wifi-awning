@@ -1,3 +1,8 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
 // Pin configuration
 const int PIN_UP = 34;
 const int PIN_DOWN = 35;
@@ -6,7 +11,7 @@ const int RELAY_DIRECTION = 2;
 const int ANEMO_PIN = 13;
 
 const int GREEN_LED = 27;
-const int RED_LED = 26;//25
+const int RED_LED = 26;  //25
 
 // Wind sensor parameters
 volatile unsigned int tickCount = 256;
@@ -30,15 +35,20 @@ bool raisingInProgress = false;
 unsigned long raiseStartTime = 0;
 unsigned short countergreen = 0;
 
-const unsigned long ALARM_RESET_TIMEOUT = 60000 * 10; 
-const unsigned long ALARM_STOP_UP_TIMEOUT = 60000; 
+const unsigned long ALARM_RESET_TIMEOUT = 60000 * 10;  //10 minutes
+const unsigned long ALARM_STOP_UP_TIMEOUT = 60000;
 
 // LED blink
 unsigned long lastBlinkTime = 0;
 bool ledState = false;
+volatile unsigned long lastInterruptTime = 0;
 
 void IRAM_ATTR windSensorISR() {
-  tickCount++;
+  unsigned long currentTime = millis();
+  if (currentTime - lastInterruptTime > 10) {  // 10ms
+    tickCount++;
+    lastInterruptTime = currentTime;
+  }
 }
 
 void setup() {
@@ -57,6 +67,13 @@ void setup() {
 
   digitalWrite(RELAY_POWER, LOW);
   digitalWrite(RELAY_DIRECTION, LOW);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Sistema pronto");
+  delay(1000);
+  lcd.clear();
 }
 
 void loop() {
@@ -67,13 +84,10 @@ void loop() {
     if (currentMillis - lastBlinkTime >= 100) {
       ledState = !ledState;
       digitalWrite(RED_LED, ledState);
-      if(raisingInProgress)
-      {
-      digitalWrite(GREEN_LED, LOW);
-      }
-      else
-      {
-      digitalWrite(GREEN_LED, ledState);
+      if (raisingInProgress) {
+        digitalWrite(GREEN_LED, LOW);
+      } else {
+        digitalWrite(GREEN_LED, ledState);
       }
       lastBlinkTime = currentMillis;
     }
@@ -93,6 +107,10 @@ void loop() {
 
     Serial.print("Wind tick/s: ");
     Serial.println(tickCount);
+    lcd.setCursor(0, 0);
+    lcd.print("Wind tick:      ");
+    lcd.setCursor(11, 0);
+    lcd.print(tickCount);
 
     if (tickCount >= WIND_TICK_THRESHOLD && !windAlarmActive) {
       windAlarmActive = true;
@@ -104,25 +122,25 @@ void loop() {
   }
 
   // --- Wind alarm reset ---
-  if (windAlarmActive)
-  { 
-
-    if(currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT) {
-	  Serial.println("Wind alarm reset.");
+  if (windAlarmActive) {
+    lcd.setCursor(0, 1);
+    lcd.print("Allarme!       ");
+    lcd.setCursor(9, 1);
+    lcd.print((ALARM_RESET_TIMEOUT/1000) - ((unsigned long)((currentMillis - alarmStartTime) / 1000)));
+    if (currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT) {
+      Serial.println("Wind alarm reset.");
+      lcd.setCursor(0, 1);
+      lcd.print("Allarm reset   ");
       raisingInProgress = false;
       windAlarmActive = false;
+    } else {
+      if (currentMillis - alarmStartTime >= ALARM_STOP_UP_TIMEOUT) {
+        Serial.println("Wind alarm stop UP.");
+        raisingInProgress = false;
+      } else {
+        raiseAwning();
+      }
     }
-	else
-	{
-		if(currentMillis - alarmStartTime >= ALARM_STOP_UP_TIMEOUT) {
-		  Serial.println("Wind alarm stop UP.");
-		  raisingInProgress = false;
-		}
-		else
-		{
-		  raiseAwning();
-		}
-	}
   }
 
   // --- Button debounce logic ---
@@ -164,23 +182,33 @@ void loop() {
 
 void raiseAwning() {
   Serial.println("UP.");
+  if (raisingInProgress == false) {
+    lcd.setCursor(0, 1);
+    lcd.print("Salita...       ");
+  }
   digitalWrite(RELAY_DIRECTION, LOW);  // Direction: UP
   delay(100);                          // Small delay to settle relays
-  digitalWrite(RELAY_POWER, HIGH);    // Power ON
+  digitalWrite(RELAY_POWER, HIGH);     // Power ON
 }
 
 void lowerAwning() {
   Serial.println("DOWN.");
-  digitalWrite(RELAY_DIRECTION, HIGH); // Direction: DOWN
+  lcd.setCursor(0, 1);
+  lcd.print("Discesa...      ");
+  digitalWrite(RELAY_DIRECTION, HIGH);  // Direction: DOWN
   delay(100);
-  digitalWrite(RELAY_POWER, HIGH);     // Power ON
+  digitalWrite(RELAY_POWER, HIGH);  // Power ON
 }
 
 void stopAwning() {
-  digitalWrite(RELAY_POWER, LOW); // Power OFF
+  digitalWrite(RELAY_POWER, LOW);  // Power OFF
   delay(100);
-  digitalWrite(RELAY_DIRECTION, LOW); // Direction: DOWN
+  digitalWrite(RELAY_DIRECTION, LOW);  // Direction: DOWN
   Serial.println("stopAwning");
+  if (windAlarmActive == false) {
+    lcd.setCursor(0, 1);
+    lcd.print("Fermo           ");
+  }
 }
 
 void retractAwningDueToAlarm() {
