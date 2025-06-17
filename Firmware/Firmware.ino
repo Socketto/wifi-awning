@@ -35,7 +35,7 @@ bool raisingInProgress = false;
 unsigned long raiseStartTime = 0;
 unsigned short countergreen = 0;
 
-const unsigned long ALARM_RESET_TIMEOUT = 60000 * 10;  //10 minutes
+const unsigned long ALARM_RESET_TIMEOUT = 60000 * 7;  //7 minutes
 const unsigned long ALARM_STOP_UP_TIMEOUT = 60000;
 
 // LED blink
