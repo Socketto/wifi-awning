@@ -1,41 +1,81 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <Preferences.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include "Credentials.h"
 
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// --- WiFi & MQTT Configuration ---
+const char *mqtt_topic_command = "awning/command";
+const char *mqtt_topic_state = "awning/state";
+const char *mqtt_topic_alarm = "awning/alarm";
+const char *mqtt_topic_info = "awning/info";
+const char *mqtt_topic_learn = "awning/learn";
+char TempString[255];
+
+bool isMovingUp = false;
+bool isMovingDown = false;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+LiquidCrystal_I2C lcd(0x27, 16, 4);
 
 // Pin configuration
 const int PIN_UP = 34;
 const int PIN_DOWN = 35;
 const int RELAY_POWER = 23;
 const int RELAY_DIRECTION = 2;
+const int CURRENT_SENSOR_PIN = 32;
 const int ANEMO_PIN = 13;
-
+const int CURRENT_THRESHOLD = 820;
+const unsigned long CURRENT_ZERO_DELAY = 500;
+bool movingToTarget = false;
 const int GREEN_LED = 27;
-const int RED_LED = 26;  //25
+const int RED_LED = 26; // 25
+enum LearningState {
+  LEARNING_IDLE = 0,
+  LEARNING_INIT,
+  LEARNING_WAIT_OPEN_INIT,
+  LEARNING_WAIT_CLOSE,
+  LEARNING_WAIT_OPEN,
+  LEARNING_DONE = 255
+};
+LearningState LearningStateMachine = LEARNING_IDLE;
 
 // Wind sensor parameters
 volatile unsigned int tickCount = 256;
 unsigned long lastWindCheck = 0;
 const unsigned long WIND_CHECK_INTERVAL = 3000;
-const int WIND_TICK_THRESHOLD = 5;
+unsigned long WIND_TICK_THRESHOLD = 40;
 
+bool wifiConnected = false;
+unsigned long lastWifiCheck = 0;
+unsigned long lastMQTTCheck = 0;
+unsigned long lastwindMQTTCheck = 0;
+unsigned long learnTimer = 0;
+unsigned long millisStop = 0;
 // Debounce
 unsigned long lastDebounceTimeUP = 0;
 unsigned long lastDebounceTimeDOWN = 0;
 const unsigned long DEBOUNCE_DELAY = 50;
 bool lastButtonStateUP = HIGH;
 bool lastButtonStateDOWN = HIGH;
-bool buttonStateUP = HIGH;
-bool buttonStateDOWN = HIGH;
-
+// --- Preferences ---
+Preferences prefs;
 // State
-bool windAlarmActive = false;
-unsigned long alarmStartTime = 0;
-bool raisingInProgress = false;
-unsigned long raiseStartTime = 0;
+
+unsigned long openDuration = 0;
+unsigned long closeDuration = 0;
+unsigned long targetMoveDuration = 0;
+unsigned long actualPositionTime = 0;
+
+volatile unsigned long currentMillis = millis();
+volatile bool windAlarmActive = false;
+volatile unsigned long alarmStartTime = 0;
+volatile bool raisingInProgress = false;
 unsigned short countergreen = 0;
 
-const unsigned long ALARM_RESET_TIMEOUT = 60000 * 7;  //7 minutes
+const unsigned long ALARM_RESET_TIMEOUT = 60000 * 7; // 7 minutes
 const unsigned long ALARM_STOP_UP_TIMEOUT = 60000;
 
 // LED blink
@@ -43,17 +83,108 @@ unsigned long lastBlinkTime = 0;
 bool ledState = false;
 volatile unsigned long lastInterruptTime = 0;
 
-void IRAM_ATTR windSensorISR() {
+void IRAM_ATTR windSensorISR()
+{
   unsigned long currentTime = millis();
-  if (currentTime - lastInterruptTime > 10) {  // 10ms
+  if (currentTime - lastInterruptTime > 10)
+  { // 10ms
     tickCount++;
     lastInterruptTime = currentTime;
   }
 }
 
-void setup() {
+void setup_wifi()
+{
+  Serial.println("WiFi...");
+  Serial.println(personalSSID);
+  Serial.println(personalSSIDPWD);
+  WiFi.begin(personalSSID, personalSSIDPWD);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+  Serial.println("Connecting to WiFi...");
+  delay(1000);
+}
+
+void callback(char *topic, byte *message, unsigned int length)
+{
+  String msg;
+  for (int i = 0; i < length; i++)
+    msg += (char)message[i];
+  msg.trim();
+
+  if (msg == "learn")
+    startLearning();
+  else 
+  if (msg == "endday")
+  {   
+      windAlarmActive = true;
+      alarmStartTime = currentMillis;
+      retractAwningDueToAlarm();
+  }
+  else if (msg == "info")
+  {
+    sprintf(TempString, "{\"openDuration\": %u , \"closeDuration\": %u , \"actualPositionTime\": %u , \"targetMoveDuration\": %u, \"WIND_TICK_THRESHOLD\": %u}", openDuration, closeDuration, actualPositionTime,targetMoveDuration,WIND_TICK_THRESHOLD);
+    client.publish(mqtt_topic_info, TempString);
+  }
+  else if (msg.startsWith("set "))
+  {
+    float percent = msg.substring(4).toFloat();
+    moveToPercentage(percent);
+  }
+  else if (msg.startsWith("setTick "))
+  {
+    WIND_TICK_THRESHOLD = msg.substring(8).toInt();
+    prefs.begin("awn", false);
+    prefs.putULong("tickThreshold", WIND_TICK_THRESHOLD);
+    prefs.end();
+  }
+}
+
+void reconnect()
+{
+  if (!client.connected())
+  {
+    if (client.connect("ESP32_Awning",mqtt_user_chars, mqtt_Password_chars))
+    {
+      client.subscribe(mqtt_topic_command);
+    }
+  }
+}
+
+int readCurrent()
+{
+  int raw = analogRead(CURRENT_SENSOR_PIN);
+  lcd.setCursor(0, 3);
+  lcd.print("                ");
+  lcd.setCursor(0, 3);
+  lcd.print(raw);
+  return raw;
+}
+
+bool isCurrentZero()
+{
+  static unsigned long belowThresholdStart = 0;
+  int current = readCurrent();
+
+  if (current < CURRENT_THRESHOLD)
+  {
+    if (belowThresholdStart == 0)
+      belowThresholdStart = millis();
+    else if (millis() - belowThresholdStart >= CURRENT_ZERO_DELAY)
+      return true;
+  }
+  else
+  {
+    belowThresholdStart = 0;
+  }
+  return false;
+}
+
+void setup()
+{
   Serial.begin(115200);
 
+  pinMode(CURRENT_SENSOR_PIN, INPUT);
   pinMode(PIN_UP, INPUT_PULLUP);
   pinMode(PIN_DOWN, INPUT_PULLUP);
   pinMode(RELAY_POWER, OUTPUT);
@@ -68,6 +199,20 @@ void setup() {
   digitalWrite(RELAY_POWER, LOW);
   digitalWrite(RELAY_DIRECTION, LOW);
 
+  setup_wifi();
+  prefs.begin("awn", true);
+  client.setServer(mqtt_server, 1883);
+  client.setBufferSize(2048);
+  client.setCallback(callback);
+
+  openDuration = prefs.getULong("openTime", 10);
+  closeDuration = prefs.getULong("closeTime", 10);
+  WIND_TICK_THRESHOLD = prefs.getULong("tickThreshold", 40);
+
+  prefs.end();
+
+  Serial.println("Awning controller ready");
+
   lcd.init();
   lcd.backlight();
   lcd.setCursor(0, 0);
@@ -76,23 +221,163 @@ void setup() {
   lcd.clear();
 }
 
-void loop() {
-  unsigned long currentMillis = millis();
+
+void loop()
+{
+  currentMillis = millis();
+  readCurrent();
+  // --- Check wifi every 10 seconds ---
+  if (currentMillis - lastWifiCheck >= 10000)
+  {
+    lastWifiCheck = currentMillis;
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      if (wifiConnected)
+      {
+        Serial.println("WiFi lost, reconnecting...");
+        wifiConnected = false;
+      }
+      else
+      {
+        Serial.println("try WiFi reconnection...");
+      }
+
+      // try reconnect wifi
+      WiFi.disconnect();
+      WiFi.begin(personalSSID, personalSSIDPWD);
+      WiFi.setAutoReconnect(true);
+      WiFi.persistent(true);
+    }
+    else
+    {
+      if (!wifiConnected)
+      {
+        Serial.println("WiFi reconnected");
+        wifiConnected = true;
+        client.setServer(mqtt_server, 1883);
+        client.setBufferSize(2048);
+        client.setCallback(callback);
+      }
+      
+    }
+  }
+
+  if (currentMillis - lastwindMQTTCheck >= 600000)
+  {
+    if(wifiConnected && client.connected())
+    {
+      lastwindMQTTCheck = currentMillis;
+      sprintf(TempString, "{\"wind\": %u}", tickCount);
+      client.publish(mqtt_topic_state, TempString);
+    }
+  }
+
+  if (wifiConnected)
+  {
+    if (currentMillis - lastMQTTCheck >= 10000)
+    {
+      lastMQTTCheck = currentMillis;
+      if (!client.connected())
+        reconnect();
+    }
+    if (client.connected())
+      client.loop();
+  }
+
+  if (LearningStateMachine != LEARNING_IDLE)
+  {
+    switch (LearningStateMachine)
+    {
+    case LEARNING_INIT:
+      learnTimer = currentMillis;
+      LearningStateMachine = LEARNING_WAIT_OPEN_INIT;
+      client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN_INIT");
+      break;
+    case LEARNING_WAIT_OPEN_INIT:
+      if (currentMillis - learnTimer >= 60000)
+      {
+        stopAwning();
+        delay(1000);
+        learnTimer = currentMillis;
+        openDuration = currentMillis;
+        LearningStateMachine = LEARNING_WAIT_CLOSE;
+        client.publish(mqtt_topic_learn, "LEARNING_WAIT_CLOSE");
+        lowerAwning();
+        delay(500);
+      }
+      else
+      {
+        raiseAwning();
+      }
+      break;
+    case LEARNING_WAIT_CLOSE:
+      if (isCurrentZero() || currentMillis - learnTimer >= 90000)
+      {
+        stopAwning();
+        delay(1000);
+        openDuration = currentMillis - openDuration;
+        learnTimer = currentMillis;
+        closeDuration = currentMillis;
+        LearningStateMachine = LEARNING_WAIT_OPEN;
+        client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN");
+        raiseAwning();
+        delay(500);
+      }
+      else
+      {
+        lowerAwning();
+      }
+      break;
+    case LEARNING_WAIT_OPEN:
+      if (isCurrentZero() || currentMillis - learnTimer >= 90000)
+      {
+        stopAwning();
+        delay(1000);
+        closeDuration = currentMillis - closeDuration;
+        learnTimer = currentMillis;
+        LearningStateMachine = LEARNING_DONE;
+        client.publish(mqtt_topic_learn, "LEARNING_DONE");
+        actualPositionTime = 0;
+        prefs.begin("awn", false);
+        prefs.putULong("openTime", openDuration);
+        prefs.putULong("closeTime", closeDuration);
+        prefs.end();
+      }
+      else
+      {
+        raiseAwning();
+      }
+      break;
+    default:
+      LearningStateMachine = LEARNING_IDLE;
+      break;
+    }
+    return;
+  }
 
   // --- LED blinking ---
-  if (windAlarmActive) {
-    if (currentMillis - lastBlinkTime >= 100) {
+  if (windAlarmActive)
+  {
+    if (currentMillis - lastBlinkTime >= 100)
+    {
       ledState = !ledState;
       digitalWrite(RED_LED, ledState);
-      if (raisingInProgress) {
+      if (raisingInProgress)
+      {
         digitalWrite(GREEN_LED, LOW);
-      } else {
+      }
+      else
+      {
         digitalWrite(GREEN_LED, ledState);
       }
       lastBlinkTime = currentMillis;
     }
-  } else {
-    if (currentMillis - lastBlinkTime >= 100) {
+  }
+  else
+  {
+    if (currentMillis - lastBlinkTime >= 100)
+    {
       countergreen++;
       ledState = countergreen % 50 == 0;
       digitalWrite(GREEN_LED, ledState);
@@ -102,7 +387,8 @@ void loop() {
   }
 
   // --- Wind check ---
-  if (currentMillis - lastWindCheck >= WIND_CHECK_INTERVAL) {
+  if (currentMillis - lastWindCheck >= WIND_CHECK_INTERVAL)
+  {
     lastWindCheck = currentMillis;
 
     Serial.print("Wind tick/s: ");
@@ -112,107 +398,197 @@ void loop() {
     lcd.setCursor(11, 0);
     lcd.print(tickCount);
 
-    if (tickCount >= WIND_TICK_THRESHOLD && !windAlarmActive) {
+    if (tickCount >= WIND_TICK_THRESHOLD && !windAlarmActive)
+    {
       windAlarmActive = true;
       alarmStartTime = currentMillis;
       retractAwningDueToAlarm();
+      sprintf(TempString, "{\"alarmwind\": %u}", tickCount);
+      client.publish(mqtt_topic_alarm, TempString);
     }
 
     tickCount = 0;
   }
 
   // --- Wind alarm reset ---
-  if (windAlarmActive) {
+  if (windAlarmActive)
+  {
     lcd.setCursor(0, 1);
     lcd.print("Allarme!       ");
     lcd.setCursor(9, 1);
-    lcd.print((ALARM_RESET_TIMEOUT/1000) - ((unsigned long)((currentMillis - alarmStartTime) / 1000)));
-    if (currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT) {
+    lcd.print((ALARM_RESET_TIMEOUT / 1000) - ((unsigned long)((currentMillis - alarmStartTime) / 1000)));
+    actualPositionTime = 0;
+    if (currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT)
+    {
       Serial.println("Wind alarm reset.");
       lcd.setCursor(0, 1);
       lcd.print("Allarm reset   ");
       raisingInProgress = false;
       windAlarmActive = false;
-    } else {
-      if (currentMillis - alarmStartTime >= ALARM_STOP_UP_TIMEOUT) {
-        Serial.println("Wind alarm stop UP.");
+    }
+    else
+    {
+      if (currentMillis - alarmStartTime >= ALARM_STOP_UP_TIMEOUT)
+      {
+        //Serial.println("Wind alarm stop UP.");
         raisingInProgress = false;
-      } else {
+      }
+      else
+      {
         raiseAwning();
+      }
+    }
+  }
+
+  if (movingToTarget && !windAlarmActive)
+  {
+    if (isMovingDown)
+    {
+      if (actualPositionTime < targetMoveDuration)
+      {
+        lowerAwning();
+      }
+      else
+      {
+        stopAwning();
+        movingToTarget = false;
+        isMovingDown = false;
+      }
+    }
+    else if (isMovingUp)
+    {
+      if (actualPositionTime > targetMoveDuration)
+      {
+        raiseAwning();
+      }
+      else
+      {
+        stopAwning();
+        movingToTarget = false;
+        isMovingUp = false;
       }
     }
   }
 
   // --- Button debounce logic ---
   bool readingUP = digitalRead(PIN_UP);
-  if (readingUP != lastButtonStateUP) {
+  if (readingUP != lastButtonStateUP)
+  {
     lastDebounceTimeUP = currentMillis;
   }
-  if ((currentMillis - lastDebounceTimeUP) > DEBOUNCE_DELAY) {
-    if (readingUP != buttonStateUP) {
-      buttonStateUP = readingUP;
-      if (buttonStateUP == LOW && !windAlarmActive) {
+  if ((currentMillis - lastDebounceTimeUP) > DEBOUNCE_DELAY)
+  {
+      if (readingUP == LOW && !windAlarmActive)
+      {
         raiseAwning();
       }
-    }
   }
   lastButtonStateUP = readingUP;
 
   bool readingDOWN = digitalRead(PIN_DOWN);
-  if (readingDOWN != lastButtonStateDOWN) {
+  if (readingDOWN != lastButtonStateDOWN)
+  {
     lastDebounceTimeDOWN = currentMillis;
   }
-  if ((currentMillis - lastDebounceTimeDOWN) > DEBOUNCE_DELAY) {
-    if (readingDOWN != buttonStateDOWN) {
-      buttonStateDOWN = readingDOWN;
-      if (buttonStateDOWN == LOW && !windAlarmActive) {
+  if ((currentMillis - lastDebounceTimeDOWN) > DEBOUNCE_DELAY)
+  {
+      if (readingDOWN == LOW && !windAlarmActive)
+      {
         lowerAwning();
       }
-    }
   }
   lastButtonStateDOWN = readingDOWN;
 
   // Stop motor if no button pressed and no automatic raise
-  if (buttonStateUP == HIGH && buttonStateDOWN == HIGH && !raisingInProgress) {
+  if (readingUP == HIGH && readingDOWN == HIGH && !raisingInProgress && !movingToTarget)
+  {
     stopAwning();
   }
 }
 
 // --- Relay logic updated to support double-deviator wiring ---
 
-void raiseAwning() {
+void raiseAwning()
+{
   Serial.println("UP.");
-  if (raisingInProgress == false) {
+  if (raisingInProgress == false)
+  {
     lcd.setCursor(0, 1);
-    lcd.print("Salita...       ");
+    lcd.print("UP...       ");
   }
-  digitalWrite(RELAY_DIRECTION, LOW);  // Direction: UP
-  delay(100);                          // Small delay to settle relays
-  digitalWrite(RELAY_POWER, HIGH);     // Power ON
+  digitalWrite(RELAY_DIRECTION, LOW); // Direction: UP
+  delay(100);                         // Small delay to settle relays
+  digitalWrite(RELAY_POWER, HIGH);    // Power ON
+  actualPositionTime -= millis() - millisStop;
+  if(actualPositionTime > 655350 ) actualPositionTime = 0;
+  millisStop = millis();
 }
 
-void lowerAwning() {
+void lowerAwning()
+{
   Serial.println("DOWN.");
   lcd.setCursor(0, 1);
-  lcd.print("Discesa...      ");
-  digitalWrite(RELAY_DIRECTION, HIGH);  // Direction: DOWN
+  lcd.print("DOWN...      ");
+  digitalWrite(RELAY_DIRECTION, HIGH); // Direction: DOWN
   delay(100);
-  digitalWrite(RELAY_POWER, HIGH);  // Power ON
+  digitalWrite(RELAY_POWER, HIGH); // Power ON
+  actualPositionTime += millis() - millisStop;
+  if(actualPositionTime > openDuration) 
+    actualPositionTime = openDuration;
+  millisStop = millis();
 }
 
-void stopAwning() {
-  digitalWrite(RELAY_POWER, LOW);  // Power OFF
+void stopAwning()
+{
+  millisStop = millis();
+  digitalWrite(RELAY_POWER, LOW);
   delay(100);
-  digitalWrite(RELAY_DIRECTION, LOW);  // Direction: DOWN
-  Serial.println("stopAwning");
-  if (windAlarmActive == false) {
+  digitalWrite(RELAY_DIRECTION, LOW);
+  isMovingUp = false;
+  isMovingDown = false;
+  movingToTarget = false;
+  if (!windAlarmActive)
+  {
     lcd.setCursor(0, 1);
     lcd.print("Fermo           ");
   }
 }
 
-void retractAwningDueToAlarm() {
+void retractAwningDueToAlarm()
+{
   Serial.println("Wind alarm! Retracting awning...");
   raisingInProgress = true;
-  raiseStartTime = millis();
+}
+
+void startLearning()
+{
+  LearningStateMachine = LEARNING_INIT;
+}
+
+void moveToPercentage(float percent)
+{
+  if (percent < 0 || percent > 100 || openDuration == 0 || closeDuration == 0)
+    return;
+
+  targetMoveDuration = (unsigned long)((float)openDuration * (percent*0.01));
+
+  if (targetMoveDuration > actualPositionTime)
+  {
+    isMovingDown = true;
+    isMovingUp = false;
+  }
+  else if (targetMoveDuration < actualPositionTime)
+  {
+    isMovingUp = true;
+    isMovingDown = false;
+  }
+  else
+  {
+    isMovingUp = false;
+    isMovingDown = false;
+    return; // already at position
+  }
+  Serial.println("moveToPercentage");
+  Serial.println(targetMoveDuration);
+  movingToTarget = true;
 }
