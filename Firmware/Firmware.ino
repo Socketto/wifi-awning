@@ -49,7 +49,7 @@ LearningState LearningStateMachine = LEARNING_IDLE;
 
 // Wind sensor parameters
 volatile unsigned int tickCount = 256;
-volatile unsigned int MAXtickCount = 256;
+volatile unsigned int MAXtickCount = 0;
 unsigned long lastWindCheck = 0;
 const unsigned long WIND_CHECK_INTERVAL = 3000;
 unsigned long WIND_TICK_THRESHOLD = 40;
