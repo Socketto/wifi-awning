@@ -261,10 +261,17 @@ void loop()
 
   if(ActualCurrent > (currentRun + (currentRun - currentNormal)))
   {
-    sprintf(TempString, "{\"wind\": %u , \"state\": \"ABNORMAL CONSUPTION %ld\"}", tickCount, ActualCurrent);
-    client.publish(mqtt_topic_alarm, TempString);
-    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ABNORMAL CONSUPTION %ld\"}", ActualCurrent);
-    client.publish(mqtt_topic_log, TempString);
+    delay(200);
+    if(ActualCurrent > (currentRun + (currentRun - currentNormal)))
+    {
+      ActualCurrent = readCurrent();
+      sprintf(TempString, "{\"wind\": %u , \"state\": \"ABNORMAL CONSUPTION %ld\"}", tickCount, ActualCurrent);
+      client.publish(mqtt_topic_alarm, TempString);
+      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ABNORMAL CONSUPTION %ld\"}", ActualCurrent);
+      client.publish(mqtt_topic_log, TempString);
+      stopAwning();
+      delay(500);
+    }
   }
   // --- Check wifi every 10 seconds ---
   if (currentMillis - lastWifiCheck >= 10000)
@@ -482,7 +489,7 @@ void loop()
       sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"WIND ALARM %u\"}", tickCount);
       client.publish(mqtt_topic_log, TempString);
     }
-    if(MAXtickCount < tickCount)
+    if(MAXtickCount < tickCount && tickCount < 200)
     {
       MAXtickCount = tickCount;
     }
