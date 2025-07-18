@@ -54,6 +54,10 @@ unsigned long lastWindCheck = 0;
 const unsigned long WIND_CHECK_INTERVAL = 3000;
 unsigned long WIND_TICK_THRESHOLD = 40;
 
+
+bool AlarmConsuption = false;
+bool PrecAlarmConsuption = false;
+unsigned long lastConsuptionCheck = 0;
 bool wifiConnected = false;
 unsigned long lastWifiCheck = 0;
 unsigned long lastMQTTCheck = 0;
@@ -253,7 +257,6 @@ void setup()
   lcd.clear();
 }
 
-
 void loop()
 {
   currentMillis = millis();
@@ -261,18 +264,31 @@ void loop()
 
   if(ActualCurrent > (currentRun + (currentRun - currentNormal)))
   {
-    delay(200);
-    if(ActualCurrent > (currentRun + (currentRun - currentNormal)))
+      AlarmConsuption = true;
+  }
+
+  if (currentMillis - lastConsuptionCheck >= 500)
+  {
+    lastConsuptionCheck = currentMillis;
+    
+    if(AlarmConsuption && PrecAlarmConsuption)
     {
-      ActualCurrent = readCurrent();
       sprintf(TempString, "{\"wind\": %u , \"state\": \"ABNORMAL CONSUPTION %ld\"}", tickCount, ActualCurrent);
       client.publish(mqtt_topic_alarm, TempString);
       sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ABNORMAL CONSUPTION %ld\"}", ActualCurrent);
       client.publish(mqtt_topic_log, TempString);
-      stopAwning();
-      delay(500);
+    }
+    if(AlarmConsuption)
+    {
+      PrecAlarmConsuption = true;
+      AlarmConsuption = false;
+    }
+    else
+    {
+      PrecAlarmConsuption = false;
     }
   }
+
   // --- Check wifi every 10 seconds ---
   if (currentMillis - lastWifiCheck >= 10000)
   {
