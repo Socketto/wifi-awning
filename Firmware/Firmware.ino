@@ -30,6 +30,7 @@ const int CURRENT_SENSOR_PIN = 32;
 const int ANEMO_PIN = 13;
 unsigned long currentNormal = 0;
 unsigned long  currentRun = 0;
+unsigned long useCurrent = 0;
 unsigned long  CURRENT_THRESHOLD = 820;
 const unsigned long CURRENT_ZERO_DELAY = 500;
 volatile unsigned long ActualCurrent;
@@ -76,6 +77,8 @@ Preferences prefs;
 
 unsigned long openDuration = 0;
 unsigned long closeDuration = 0;
+unsigned long LASTopenDuration = 0;
+unsigned long LASTcloseDuration = 0;
 unsigned long targetMoveDuration = 0;
 unsigned long actualPositionTime = 0;
 
@@ -138,9 +141,14 @@ void callback(char *topic, byte *message, unsigned int length)
   msg.trim();
 
   if (msg == "learn")
+  {
+    prefs.begin("awn", false);
+    prefs.putULong("useCurrent", 1);
+    useCurrent = 1;
+    prefs.end();
     startLearning();
-  else 
-  if (msg == "endday")
+  }
+  else if (msg == "endday")
   {   
       windAlarmActive = true;
       alarmStartTime = currentMillis;
@@ -152,7 +160,7 @@ void callback(char *topic, byte *message, unsigned int length)
   {
     sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Request info\"}");
     client.publish(mqtt_topic_log, TempString);
-    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Request info: openDuration: %u, closeDuration: %u, actualPositionTime: %u, targetMoveDuration: %u, WIND_TICK_THRESHOLD: %u, currentNormal: %u, currentRun: %u, CURRENT_THRESHOLD: %u, WiFi_signal : %u\"}", openDuration, closeDuration, actualPositionTime,targetMoveDuration,WIND_TICK_THRESHOLD,currentNormal,currentRun,CURRENT_THRESHOLD,rssi_to_percentage(WiFi.RSSI()));
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Request info: openDuration: %u, closeDuration: %u, actualPositionTime: %u, targetMoveDuration: %u, WIND_TICK_THRESHOLD: %u, currentNormal: %u, currentRun: %u, CURRENT_THRESHOLD: %u, WiFi_signal : %u, useCurrent : %u\"}", openDuration, closeDuration, actualPositionTime,targetMoveDuration,WIND_TICK_THRESHOLD,currentNormal,currentRun,CURRENT_THRESHOLD,rssi_to_percentage(WiFi.RSSI()),useCurrent);
     client.publish(mqtt_topic_log, TempString);
     sprintf(TempString, "{\"openDuration\": %u , \"closeDuration\": %u , \"actualPositionTime\": %u , \"targetMoveDuration\": %u, \"WIND_TICK_THRESHOLD\": %u, \"currentNormal\": %u, \"currentRun\": %u, \"CURRENT_THRESHOLD\": %u, \"WiFi_signal\" : %u}", openDuration, closeDuration, actualPositionTime,targetMoveDuration,WIND_TICK_THRESHOLD,currentNormal,currentRun,CURRENT_THRESHOLD,rssi_to_percentage(WiFi.RSSI()));
     client.publish(mqtt_topic_info, TempString);
@@ -161,6 +169,17 @@ void callback(char *topic, byte *message, unsigned int length)
   {
     float percent = msg.substring(4).toFloat();
     moveToPercentage(percent);
+  }
+  else if (msg.startsWith("setDuration "))
+  {
+    closeDuration = msg.substring(12).toInt();
+    openDuration = msg.substring(12).toInt();
+    prefs.begin("awn", false);
+    prefs.putULong("openTime", openDuration);
+    prefs.putULong("closeTime", closeDuration);
+    prefs.putULong("useCurrent", 0);
+    useCurrent = 0;
+    prefs.end();
   }
   else if (msg.startsWith("setTick "))
   {
@@ -198,6 +217,11 @@ bool isCurrentZero()
 {
   static unsigned long belowThresholdStart = 0;
   int current = readCurrent();
+
+  if(useCurrent == 0)
+  {
+    return false;
+  }
 
   if (current < CURRENT_THRESHOLD)
   {
@@ -242,6 +266,7 @@ void setup()
   currentRun = prefs.getULong("currentRun", 850);
   CURRENT_THRESHOLD = prefs.getULong("CURRENT_THRESHOLD", 820);
   openDuration = prefs.getULong("openTime", 10);
+  useCurrent = prefs.getULong("useCurrent", 0);
   closeDuration = prefs.getULong("closeTime", 10);
   WIND_TICK_THRESHOLD = prefs.getULong("tickThreshold", 40);
 
@@ -355,6 +380,8 @@ void loop()
     switch (LearningStateMachine)
     {
     case LEARNING_INIT:
+      LASTopenDuration = openDuration;
+      LASTcloseDuration = closeDuration;
       learnTimer = currentMillis;
       LearningStateMachine = LEARNING_CURRENT_CONSUPTION;
       client.publish(mqtt_topic_learn, "LEARNING_CURRENT_CONSUPTION");
@@ -404,17 +431,34 @@ void loop()
     case LEARNING_WAIT_CLOSE:
       if (isCurrentZero() || currentMillis - learnTimer >= 90000)
       {
-        stopAwning();
-        delay(1000);
-        openDuration = currentMillis - openDuration;
-        learnTimer = currentMillis;
-        closeDuration = currentMillis;
-        LearningStateMachine = LEARNING_WAIT_OPEN;
-        client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN");
-        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_OPEN\"}");
-        client.publish(mqtt_topic_log, TempString);
-        raiseAwning();
-        delay(500);
+        if(currentMillis - learnTimer >= 90000)
+        {
+          prefs.begin("awn", false);
+          prefs.putULong("useCurrent", 0);
+          useCurrent = 0;
+          prefs.end();
+          LearningStateMachine = LEARNING_DONE;
+          client.publish(mqtt_topic_learn, "LEARNING_ERROR");
+          openDuration = LASTopenDuration;
+          closeDuration = LASTcloseDuration;
+          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_ERROR\"}");
+          client.publish(mqtt_topic_log, TempString);
+          actualPositionTime = 0;
+        }
+        else
+        {
+          openDuration = currentMillis - openDuration;
+          stopAwning();
+          delay(1000);
+          learnTimer = currentMillis;
+          closeDuration = currentMillis;
+          LearningStateMachine = LEARNING_WAIT_OPEN;
+          client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN");
+          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_OPEN\"}");
+          client.publish(mqtt_topic_log, TempString);
+          raiseAwning();
+          delay(500);
+        }
       }
       else
       {
@@ -424,22 +468,39 @@ void loop()
     case LEARNING_WAIT_OPEN:
       if (isCurrentZero() || currentMillis - learnTimer >= 90000)
       {
-        stopAwning();
-        delay(1000);
-        closeDuration = currentMillis - closeDuration;
-        learnTimer = currentMillis;
-        LearningStateMachine = LEARNING_DONE;
-        client.publish(mqtt_topic_learn, "LEARNING_DONE");
-        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_DONE\"}");
-        client.publish(mqtt_topic_log, TempString);
-        actualPositionTime = 0;
-        prefs.begin("awn", false);
-        prefs.putULong("openTime", openDuration);
-        prefs.putULong("closeTime", closeDuration);
-        prefs.putULong("CURRENT_THRESHOLD", CURRENT_THRESHOLD);
-        prefs.putULong("currentNormal", currentNormal);
-        prefs.putULong("currentRun", currentRun);
-        prefs.end();
+        if(currentMillis - learnTimer >= 90000)
+        {
+          prefs.begin("awn", false);
+          prefs.putULong("useCurrent", 0);
+          useCurrent = 0;
+          prefs.end();
+          LearningStateMachine = LEARNING_DONE;
+          client.publish(mqtt_topic_learn, "LEARNING_ERROR");
+          openDuration = LASTopenDuration;
+          closeDuration = LASTcloseDuration;
+          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_ERROR\"}");
+          client.publish(mqtt_topic_log, TempString);
+          actualPositionTime = 0;
+        }
+        else
+        {
+          closeDuration = currentMillis - closeDuration;
+          stopAwning();
+          delay(1000);
+          learnTimer = currentMillis;
+          LearningStateMachine = LEARNING_DONE;
+          client.publish(mqtt_topic_learn, "LEARNING_DONE");
+          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_DONE\"}");
+          client.publish(mqtt_topic_log, TempString);
+          actualPositionTime = 0;
+          prefs.begin("awn", false);
+          prefs.putULong("openTime", openDuration);
+          prefs.putULong("closeTime", closeDuration);
+          prefs.putULong("CURRENT_THRESHOLD", CURRENT_THRESHOLD);
+          prefs.putULong("currentNormal", currentNormal);
+          prefs.putULong("currentRun", currentRun);
+          prefs.end();
+        }
       }
       else
       {
@@ -671,6 +732,11 @@ void moveToPercentage(float percent)
 {
   if (percent < 0 || percent > 100 || openDuration == 0 || closeDuration == 0)
     return;
+
+  if (percent == 100)
+  {
+    percent = 120;
+  }
 
   targetMoveDuration = (unsigned long)((float)openDuration * (percent*0.01));
 
