@@ -5,17 +5,31 @@
 #include <PubSubClient.h>
 #include "Credentials.h"
 
+//#define TestBoard
+
+#ifndef TestBoard
 // --- WiFi & MQTT Configuration ---
 const char *mqtt_topic_command = "awning/command";
 const char *mqtt_topic_state = "awning/state";
 const char *mqtt_topic_alarm = "awning/alarm";
 const char *mqtt_topic_info = "awning/info";
 const char *mqtt_topic_learn = "awning/learn";
+#else
+// --- WiFi & MQTT Configuration ---
+const char *mqtt_topic_command = "awning1/command";
+const char *mqtt_topic_state = "awning1/state";
+const char *mqtt_topic_alarm = "awning1/alarm";
+const char *mqtt_topic_info = "awning1/info";
+const char *mqtt_topic_learn = "awning1/learn";
+#endif
 const char *mqtt_topic_log = "bot_log";
 char TempString[2048];
 
 bool isMovingUp = false;
 bool isMovingDown = false;
+bool LCDPresent = false;
+bool FirstStart = true;
+bool ReconnectionSuccess = true;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -29,14 +43,14 @@ const int RELAY_DIRECTION = 2;
 const int CURRENT_SENSOR_PIN = 32;
 const int ANEMO_PIN = 13;
 unsigned long currentNormal = 0;
-unsigned long  currentRun = 0;
+unsigned long currentRun = 0;
 unsigned long useCurrent = 0;
-unsigned long  CURRENT_THRESHOLD = 820;
+unsigned long CURRENT_THRESHOLD = 820;
 const unsigned long CURRENT_ZERO_DELAY = 500;
 volatile unsigned long ActualCurrent;
 bool movingToTarget = false;
 const int GREEN_LED = 27;
-const int RED_LED = 26; // 25
+const int RED_LED = 26;  // 25
 enum LearningState {
   LEARNING_IDLE = 0,
   LEARNING_INIT,
@@ -88,7 +102,7 @@ volatile unsigned long alarmStartTime = 0;
 volatile bool raisingInProgress = false;
 unsigned short countergreen = 0;
 
-const unsigned long ALARM_RESET_TIMEOUT = 60000 * 7; // 7 minutes
+const unsigned long ALARM_RESET_TIMEOUT = 60000 * 7;  // 7 minutes
 const unsigned long ALARM_STOP_UP_TIMEOUT = 60000;
 
 // LED blink
@@ -96,14 +110,21 @@ unsigned long lastBlinkTime = 0;
 bool ledState = false;
 volatile unsigned long lastInterruptTime = 0;
 
-void IRAM_ATTR windSensorISR()
-{
+void IRAM_ATTR windSensorISR() {
   unsigned long currentTime = millis();
-  if (currentTime - lastInterruptTime > 10)
-  { // 10ms
+  if (currentTime - lastInterruptTime > 10) {  // 10ms
     tickCount++;
     lastInterruptTime = currentTime;
   }
+}
+
+bool devicePresent(byte address) {
+  Wire.begin(21, 22);     // SDA, SCL
+  Wire.setClock(100000);  // Imposta frequenza a 100 kHz
+  delay(2000);
+  Serial.println("Scansione I2C...");
+  Wire.beginTransmission(address);
+  return (Wire.endTransmission() == 0);
 }
 
 int rssi_to_percentage(int rssi) {
@@ -120,12 +141,15 @@ int rssi_to_percentage(int rssi) {
   return percentage;
 }
 
-void setup_wifi()
-{
+void setup_wifi() {
   Serial.println("WiFi...");
   Serial.println(personalSSID);
   Serial.println(personalSSIDPWD);
+#ifndef TestBoard
   WiFi.hostname("Esp32Awning1");
+#else
+  WiFi.hostname("Esp32AwningTest");
+#endif
   WiFi.begin(personalSSID, personalSSIDPWD);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
@@ -133,45 +157,45 @@ void setup_wifi()
   delay(1000);
 }
 
-void callback(char *topic, byte *message, unsigned int length)
-{
+void callback(char *topic, byte *message, unsigned int length) {
   String msg;
   for (int i = 0; i < length; i++)
     msg += (char)message[i];
   msg.trim();
 
-  if (msg == "learn")
-  {
+  if (msg == "learn") {
     prefs.begin("awn", false);
     prefs.putULong("useCurrent", 1);
     useCurrent = 1;
     prefs.end();
     startLearning();
-  }
-  else if (msg == "endday")
-  {   
-      windAlarmActive = true;
-      alarmStartTime = currentMillis;
-      retractAwningDueToAlarm();
-      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Close awning for the end of the day\"}");
-      client.publish(mqtt_topic_log, TempString);
-  }
-  else if (msg == "info")
-  {
-    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Request info\"}");
+  } else if (msg == "endday") {
+    windAlarmActive = true;
+    alarmStartTime = currentMillis;
+    retractAwningDueToAlarm();
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Close awning for the end of the day\"}");
     client.publish(mqtt_topic_log, TempString);
-    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Request info: openDuration: %u, closeDuration: %u, actualPositionTime: %u, targetMoveDuration: %u, WIND_TICK_THRESHOLD: %u, currentNormal: %u, currentRun: %u, CURRENT_THRESHOLD: %u, WiFi_signal : %u, useCurrent : %u\"}", openDuration, closeDuration, actualPositionTime,targetMoveDuration,WIND_TICK_THRESHOLD,currentNormal,currentRun,CURRENT_THRESHOLD,rssi_to_percentage(WiFi.RSSI()),useCurrent);
+  } else if (msg == "reboot") {
+    ESP.restart();
+  } else if (msg == "current") {
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ActualCurrent: %u\" }", ActualCurrent);
     client.publish(mqtt_topic_log, TempString);
-    sprintf(TempString, "{\"openDuration\": %u , \"closeDuration\": %u , \"actualPositionTime\": %u , \"targetMoveDuration\": %u, \"WIND_TICK_THRESHOLD\": %u, \"currentNormal\": %u, \"currentRun\": %u, \"CURRENT_THRESHOLD\": %u, \"WiFi_signal\" : %u}", openDuration, closeDuration, actualPositionTime,targetMoveDuration,WIND_TICK_THRESHOLD,currentNormal,currentRun,CURRENT_THRESHOLD,rssi_to_percentage(WiFi.RSSI()));
+    sprintf(TempString, "{\"ActualCurrent\": %u }", ActualCurrent);
     client.publish(mqtt_topic_info, TempString);
-  }
-  else if (msg.startsWith("set "))
-  {
+  } else if (msg == "wind") {
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Wind: %u\" }", tickCount);
+    client.publish(mqtt_topic_log, TempString);
+    sprintf(TempString, "{\"Wind\": %u }", tickCount);
+    client.publish(mqtt_topic_info, TempString);
+  } else if (msg == "info") {
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Request info: openDuration: %u, closeDuration: %u, actualPositionTime: %u, targetMoveDuration: %u, WIND_TICK_THRESHOLD: %u, currentNormal: %u, currentRun: %u, CURRENT_THRESHOLD: %u, WiFi_signal : %u, useCurrent : %u\"}", openDuration, closeDuration, actualPositionTime, targetMoveDuration, WIND_TICK_THRESHOLD, currentNormal, currentRun, CURRENT_THRESHOLD, rssi_to_percentage(WiFi.RSSI()), useCurrent);
+    client.publish(mqtt_topic_log, TempString);
+    sprintf(TempString, "{\"openDuration\": %u , \"closeDuration\": %u , \"actualPositionTime\": %u , \"targetMoveDuration\": %u, \"WIND_TICK_THRESHOLD\": %u, \"currentNormal\": %u, \"currentRun\": %u, \"CURRENT_THRESHOLD\": %u, \"WiFi_signal\" : %u}", openDuration, closeDuration, actualPositionTime, targetMoveDuration, WIND_TICK_THRESHOLD, currentNormal, currentRun, CURRENT_THRESHOLD, rssi_to_percentage(WiFi.RSSI()));
+    client.publish(mqtt_topic_info, TempString);
+  } else if (msg.startsWith("set ")) {
     float percent = msg.substring(4).toFloat();
     moveToPercentage(percent);
-  }
-  else if (msg.startsWith("setDuration "))
-  {
+  } else if (msg.startsWith("setDuration ")) {
     closeDuration = msg.substring(12).toInt();
     openDuration = msg.substring(12).toInt();
     prefs.begin("awn", false);
@@ -180,9 +204,7 @@ void callback(char *topic, byte *message, unsigned int length)
     prefs.putULong("useCurrent", 0);
     useCurrent = 0;
     prefs.end();
-  }
-  else if (msg.startsWith("setTick "))
-  {
+  } else if (msg.startsWith("setTick ")) {
     WIND_TICK_THRESHOLD = msg.substring(8).toInt();
     prefs.begin("awn", false);
     prefs.putULong("tickThreshold", WIND_TICK_THRESHOLD);
@@ -192,55 +214,72 @@ void callback(char *topic, byte *message, unsigned int length)
   }
 }
 
-void reconnect()
-{
-  if (!client.connected())
-  {
-    if (client.connect("ESP32_Awning",mqtt_user_chars, mqtt_Password_chars))
-    {
-      client.subscribe(mqtt_topic_command);
+void reconnect() {
+  if (!client.connected()) {
+    client.setServer(mqtt_server, 1883);
+    client.setBufferSize(2048);
+    client.setCallback(callback);
+#ifndef TestBoard
+    if (client.connect("ESP32_Awning", mqtt_user_chars, mqtt_Password_chars)) {
+      client.subscribe(mqtt_topic_command);  // iscriviti al topic solo dopo la connessione
+      Serial.println("MQTT connesso e iscritto al topic.");
+      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"MQTT_CONNECTED\"}");
+      client.publish(mqtt_topic_log, TempString);
+    } else {
+      Serial.print("MQTT connection failed. Code: ");
+      Serial.println(client.state());  // utile per debug
     }
+#else
+    if (client.connect("ESP32_AwningTest", mqtt_user_chars, mqtt_Password_chars)) {
+      client.subscribe(mqtt_topic_command);  // iscriviti al topic solo dopo la connessione
+      Serial.println("MQTT connesso e iscritto al topic.");
+      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"MQTT_CONNECTED\"}");
+      client.publish(mqtt_topic_log, TempString);
+    } else {
+      Serial.print("MQTT connection failed. Code: ");
+      Serial.println(client.state());  // utile per debug
+    }
+#endif
   }
 }
 
-int readCurrent()
-{
+int readCurrent() {
   int raw = analogRead(CURRENT_SENSOR_PIN);
-  lcd.setCursor(0, 3);
-  lcd.print("                ");
-  lcd.setCursor(0, 3);
-  lcd.print(raw);
+  if (LCDPresent) {
+    lcd.setCursor(0, 3);
+    lcd.print("                ");
+    lcd.setCursor(0, 3);
+    lcd.print(raw);
+  }
   return raw;
 }
 
-bool isCurrentZero()
-{
+bool isCurrentZero() {
   static unsigned long belowThresholdStart = 0;
   int current = readCurrent();
 
-  if(useCurrent == 0)
-  {
+  if (useCurrent == 0) {
     return false;
   }
 
-  if (current < CURRENT_THRESHOLD)
-  {
+  if (current < CURRENT_THRESHOLD) {
     if (belowThresholdStart == 0)
       belowThresholdStart = millis();
     else if (millis() - belowThresholdStart >= CURRENT_ZERO_DELAY)
       return true;
-  }
-  else
-  {
+  } else {
     belowThresholdStart = 0;
   }
   return false;
 }
 
-void setup()
-{
+void setup() {
   Serial.begin(115200);
 
+#ifdef TestBoard
+  Serial.println("TestBoard");
+  delay(10000);
+#endif
   pinMode(CURRENT_SENSOR_PIN, INPUT);
   pinMode(PIN_UP, INPUT_PULLUP);
   pinMode(PIN_DOWN, INPUT_PULLUP);
@@ -255,7 +294,12 @@ void setup()
 
   digitalWrite(RELAY_POWER, LOW);
   digitalWrite(RELAY_DIRECTION, LOW);
-
+  if (devicePresent(0x27)) {
+    LCDPresent = true;
+  }
+  Serial.print("LCD ");
+  Serial.println(LCDPresent);
+  Serial.println("");
   setup_wifi();
   prefs.begin("awn", true);
   client.setServer(mqtt_server, 1883);
@@ -274,268 +318,238 @@ void setup()
 
   Serial.println("Awning controller ready");
 
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Sistema pronto");
-  delay(1000);
-  lcd.clear();
+  if (LCDPresent) {
+    lcd.init();
+    lcd.backlight();
+    lcd.setCursor(0, 0);
+    lcd.print("Sistema pronto");
+    delay(1000);
+    lcd.clear();
+  }
 }
 
-void loop()
-{
+void loop() {
   currentMillis = millis();
   ActualCurrent = readCurrent();
 
-  if(ActualCurrent > (currentRun + (currentRun - currentNormal)))
-  {
-      AlarmConsuption = true;
+  if (ActualCurrent > (currentRun + (currentRun - currentNormal))) {
+    AlarmConsuption = true;
   }
 
-  if (currentMillis - lastConsuptionCheck >= 500)
-  {
+  if (currentMillis - lastConsuptionCheck >= 500) {
     lastConsuptionCheck = currentMillis;
-    
-    if(AlarmConsuption && PrecAlarmConsuption)
-    {
-      sprintf(TempString, "{\"wind\": %u , \"state\": \"ABNORMAL CONSUPTION %ld\"}", tickCount, ActualCurrent);
-      client.publish(mqtt_topic_alarm, TempString);
-      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ABNORMAL CONSUPTION %ld\"}", ActualCurrent);
-      client.publish(mqtt_topic_log, TempString);
+
+    if (AlarmConsuption && PrecAlarmConsuption) {
+      if (wifiConnected && client.connected())
+      {
+        sprintf(TempString, "{\"wind\": %u , \"state\": \"ABNORMAL CONSUPTION %ld\"}", tickCount, ActualCurrent);
+        client.publish(mqtt_topic_alarm, TempString);
+        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ABNORMAL CONSUPTION %ld\"}", ActualCurrent);
+        client.publish(mqtt_topic_log, TempString);
+      }
     }
-    if(AlarmConsuption)
-    {
+    if (AlarmConsuption) {
       PrecAlarmConsuption = true;
       AlarmConsuption = false;
-    }
-    else
-    {
+    } else {
       PrecAlarmConsuption = false;
     }
   }
-
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiConnected) {
+      Serial.println("WiFi lost, reconnecting...");
+      wifiConnected = false;
+    }
+  }
   // --- Check wifi every 10 seconds ---
-  if (currentMillis - lastWifiCheck >= 10000)
-  {
+  if (currentMillis - lastWifiCheck >= 30000) {
     lastWifiCheck = currentMillis;
 
-    if (WiFi.status() != WL_CONNECTED)
-    {
-      if (wifiConnected)
-      {
+    if (WiFi.status() != WL_CONNECTED) {
+      if (wifiConnected) {
         Serial.println("WiFi lost, reconnecting...");
         wifiConnected = false;
-      }
-      else
-      {
+      } else {
         Serial.println("try WiFi reconnection...");
+        WiFi.begin(personalSSID, personalSSIDPWD);
       }
 
-      // try reconnect wifi
-      WiFi.disconnect();
+
+#ifndef TestBoard
       WiFi.hostname("Esp32Awning1");
-      WiFi.begin(personalSSID, personalSSIDPWD);
-      WiFi.setAutoReconnect(true);
-      WiFi.persistent(true);
-    }
-    else
-    {
-      if (!wifiConnected)
-      {
+#else
+      WiFi.hostname("Esp32AwningTest");
+#endif
+    } else {
+      if (!wifiConnected) {
         Serial.println("WiFi reconnected");
         wifiConnected = true;
-        client.setServer(mqtt_server, 1883);
-        client.setBufferSize(2048);
-        client.setCallback(callback);
       }
-      
     }
   }
 
-  if (currentMillis - lastwindMQTTCheck >= 600000)
-  {
-    if(wifiConnected && client.connected())
-    {
+  if (currentMillis - lastwindMQTTCheck >= 600000) {
+    if (wifiConnected && client.connected()) {
       lastwindMQTTCheck = currentMillis;
       sprintf(TempString, "{\"wind\": %u , \"WiFi_signal\" : %u}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()));
-      MAXtickCount = 0;
       client.publish(mqtt_topic_state, TempString);
+      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"wind: %u , WiFi_signal : %u\"}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()));
+      client.publish(mqtt_topic_log, TempString);
+      MAXtickCount = 0;
     }
   }
 
-  if (wifiConnected)
-  {
-    if (currentMillis - lastMQTTCheck >= 10000)
-    {
+  if (wifiConnected) {
+    if (currentMillis - lastMQTTCheck >= 10000) {
       lastMQTTCheck = currentMillis;
       if (!client.connected())
+      {
         reconnect();
+        ReconnectionSuccess = true;
+      }
     }
-    if (client.connected())
+    if (client.connected()) {
+      Serial.println("client.connected");
       client.loop();
+    }
   }
 
-  if (LearningStateMachine != LEARNING_IDLE)
-  {
-    switch (LearningStateMachine)
-    {
-    case LEARNING_INIT:
-      LASTopenDuration = openDuration;
-      LASTcloseDuration = closeDuration;
-      learnTimer = currentMillis;
-      LearningStateMachine = LEARNING_CURRENT_CONSUPTION;
-      client.publish(mqtt_topic_learn, "LEARNING_CURRENT_CONSUPTION");
-      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_CURRENT_CONSUPTION\"}");
-      client.publish(mqtt_topic_log, TempString);
-      break;
-    case LEARNING_CURRENT_CONSUPTION:
-      stopAwning();
-      delay(1000);
-      lowerAwning();
-      delay(7000);
-      stopAwning();
-      delay(2000);
-      raiseAwning();
-      delay(2000);
-      currentRun = readCurrent();
-      stopAwning();
-      delay(1000);
-      currentNormal = readCurrent();
-      CURRENT_THRESHOLD = currentNormal + ((currentRun - currentNormal)/2);
-      LearningStateMachine = LEARNING_WAIT_OPEN_INIT;
-      client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN_INIT");
-      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_OPEN_INIT\"}");
-      client.publish(mqtt_topic_log, TempString);
-      raiseAwning();
-      delay(500);
-      break;
-    case LEARNING_WAIT_OPEN_INIT:
-      if (isCurrentZero() || currentMillis - learnTimer >= 60000)
-      {
+  if (LearningStateMachine != LEARNING_IDLE) {
+    switch (LearningStateMachine) {
+      case LEARNING_INIT:
+        LASTopenDuration = openDuration;
+        LASTcloseDuration = closeDuration;
+        learnTimer = currentMillis;
+        LearningStateMachine = LEARNING_CURRENT_CONSUPTION;
+        client.publish(mqtt_topic_learn, "LEARNING_CURRENT_CONSUPTION");
+        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_CURRENT_CONSUPTION\"}");
+        client.publish(mqtt_topic_log, TempString);
+        break;
+      case LEARNING_CURRENT_CONSUPTION:
         stopAwning();
         delay(1000);
-        learnTimer = currentMillis;
-        openDuration = currentMillis;
-        LearningStateMachine = LEARNING_WAIT_CLOSE;
-        client.publish(mqtt_topic_learn, "LEARNING_WAIT_CLOSE");
-        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_CLOSE\"}");
+        lowerAwning();
+        delay(7000);
+        stopAwning();
+        delay(2000);
+        raiseAwning();
+        delay(2000);
+        currentRun = readCurrent();
+        stopAwning();
+        delay(1000);
+        currentNormal = readCurrent();
+        CURRENT_THRESHOLD = currentNormal + ((currentRun - currentNormal) / 2);
+        LearningStateMachine = LEARNING_WAIT_OPEN_INIT;
+        client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN_INIT");
+        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_OPEN_INIT\"}");
         client.publish(mqtt_topic_log, TempString);
-        lowerAwning();
+        raiseAwning();
         delay(500);
-      }
-      else
-      {
-        raiseAwning();
-      }
-      break;
-    case LEARNING_WAIT_CLOSE:
-      if (isCurrentZero() || currentMillis - learnTimer >= 90000)
-      {
-        if(currentMillis - learnTimer >= 90000)
-        {
-          prefs.begin("awn", false);
-          prefs.putULong("useCurrent", 0);
-          useCurrent = 0;
-          prefs.end();
-          LearningStateMachine = LEARNING_DONE;
-          client.publish(mqtt_topic_learn, "LEARNING_ERROR");
-          openDuration = LASTopenDuration;
-          closeDuration = LASTcloseDuration;
-          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_ERROR\"}");
-          client.publish(mqtt_topic_log, TempString);
-          actualPositionTime = 0;
-        }
-        else
-        {
-          openDuration = currentMillis - openDuration;
+        break;
+      case LEARNING_WAIT_OPEN_INIT:
+        if (isCurrentZero() || currentMillis - learnTimer >= 60000) {
           stopAwning();
           delay(1000);
           learnTimer = currentMillis;
-          closeDuration = currentMillis;
-          LearningStateMachine = LEARNING_WAIT_OPEN;
-          client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN");
-          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_OPEN\"}");
+          openDuration = currentMillis;
+          LearningStateMachine = LEARNING_WAIT_CLOSE;
+          client.publish(mqtt_topic_learn, "LEARNING_WAIT_CLOSE");
+          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_CLOSE\"}");
           client.publish(mqtt_topic_log, TempString);
-          raiseAwning();
+          lowerAwning();
           delay(500);
+        } else {
+          raiseAwning();
         }
-      }
-      else
-      {
-        lowerAwning();
-      }
-      break;
-    case LEARNING_WAIT_OPEN:
-      if (isCurrentZero() || currentMillis - learnTimer >= 90000)
-      {
-        if(currentMillis - learnTimer >= 90000)
-        {
-          prefs.begin("awn", false);
-          prefs.putULong("useCurrent", 0);
-          useCurrent = 0;
-          prefs.end();
-          LearningStateMachine = LEARNING_DONE;
-          client.publish(mqtt_topic_learn, "LEARNING_ERROR");
-          openDuration = LASTopenDuration;
-          closeDuration = LASTcloseDuration;
-          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_ERROR\"}");
-          client.publish(mqtt_topic_log, TempString);
-          actualPositionTime = 0;
+        break;
+      case LEARNING_WAIT_CLOSE:
+        if (isCurrentZero() || currentMillis - learnTimer >= 90000) {
+          if (currentMillis - learnTimer >= 90000) {
+            prefs.begin("awn", false);
+            prefs.putULong("useCurrent", 0);
+            useCurrent = 0;
+            prefs.end();
+            LearningStateMachine = LEARNING_DONE;
+            client.publish(mqtt_topic_learn, "LEARNING_ERROR");
+            openDuration = LASTopenDuration;
+            closeDuration = LASTcloseDuration;
+            sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_ERROR\"}");
+            client.publish(mqtt_topic_log, TempString);
+            actualPositionTime = 0;
+          } else {
+            openDuration = currentMillis - openDuration;
+            stopAwning();
+            delay(1000);
+            learnTimer = currentMillis;
+            closeDuration = currentMillis;
+            LearningStateMachine = LEARNING_WAIT_OPEN;
+            client.publish(mqtt_topic_learn, "LEARNING_WAIT_OPEN");
+            sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_WAIT_OPEN\"}");
+            client.publish(mqtt_topic_log, TempString);
+            raiseAwning();
+            delay(500);
+          }
+        } else {
+          lowerAwning();
         }
-        else
-        {
-          closeDuration = currentMillis - closeDuration;
-          stopAwning();
-          delay(1000);
-          learnTimer = currentMillis;
-          LearningStateMachine = LEARNING_DONE;
-          client.publish(mqtt_topic_learn, "LEARNING_DONE");
-          sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_DONE\"}");
-          client.publish(mqtt_topic_log, TempString);
-          actualPositionTime = 0;
-          prefs.begin("awn", false);
-          prefs.putULong("openTime", openDuration);
-          prefs.putULong("closeTime", closeDuration);
-          prefs.putULong("CURRENT_THRESHOLD", CURRENT_THRESHOLD);
-          prefs.putULong("currentNormal", currentNormal);
-          prefs.putULong("currentRun", currentRun);
-          prefs.end();
+        break;
+      case LEARNING_WAIT_OPEN:
+        if (isCurrentZero() || currentMillis - learnTimer >= 90000) {
+          if (currentMillis - learnTimer >= 90000) {
+            prefs.begin("awn", false);
+            prefs.putULong("useCurrent", 0);
+            useCurrent = 0;
+            prefs.end();
+            LearningStateMachine = LEARNING_DONE;
+            client.publish(mqtt_topic_learn, "LEARNING_ERROR");
+            openDuration = LASTopenDuration;
+            closeDuration = LASTcloseDuration;
+            sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_ERROR\"}");
+            client.publish(mqtt_topic_log, TempString);
+            actualPositionTime = 0;
+          } else {
+            closeDuration = currentMillis - closeDuration;
+            stopAwning();
+            delay(1000);
+            learnTimer = currentMillis;
+            LearningStateMachine = LEARNING_DONE;
+            client.publish(mqtt_topic_learn, "LEARNING_DONE");
+            sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Learn status: LEARNING_DONE\"}");
+            client.publish(mqtt_topic_log, TempString);
+            actualPositionTime = 0;
+            prefs.begin("awn", false);
+            prefs.putULong("openTime", openDuration);
+            prefs.putULong("closeTime", closeDuration);
+            prefs.putULong("CURRENT_THRESHOLD", CURRENT_THRESHOLD);
+            prefs.putULong("currentNormal", currentNormal);
+            prefs.putULong("currentRun", currentRun);
+            prefs.end();
+          }
+        } else {
+          raiseAwning();
         }
-      }
-      else
-      {
-        raiseAwning();
-      }
-      break;
-    default:
-      LearningStateMachine = LEARNING_IDLE;
-      break;
+        break;
+      default:
+        LearningStateMachine = LEARNING_IDLE;
+        break;
     }
     return;
   }
 
   // --- LED blinking ---
-  if (windAlarmActive)
-  {
-    if (currentMillis - lastBlinkTime >= 100)
-    {
+  if (windAlarmActive) {
+    if (currentMillis - lastBlinkTime >= 100) {
       ledState = !ledState;
       digitalWrite(RED_LED, ledState);
-      if (raisingInProgress)
-      {
+      if (raisingInProgress) {
         digitalWrite(GREEN_LED, LOW);
-      }
-      else
-      {
+      } else {
         digitalWrite(GREEN_LED, ledState);
       }
       lastBlinkTime = currentMillis;
     }
-  }
-  else
-  {
-    if (currentMillis - lastBlinkTime >= 100)
-    {
+  } else {
+    if (currentMillis - lastBlinkTime >= 100) {
       countergreen++;
       ledState = countergreen % 50 == 0;
       digitalWrite(GREEN_LED, ledState);
@@ -545,87 +559,89 @@ void loop()
   }
 
   // --- Wind check ---
-  if (currentMillis - lastWindCheck >= WIND_CHECK_INTERVAL)
-  {
+  if (currentMillis - lastWindCheck >= WIND_CHECK_INTERVAL) {
     lastWindCheck = currentMillis;
 
     Serial.print("Wind tick/s: ");
     Serial.println(tickCount);
-    lcd.setCursor(0, 0);
-    lcd.print("Wind tick:      ");
-    lcd.setCursor(11, 0);
-    lcd.print(tickCount);
+    if (LCDPresent) {
+      lcd.setCursor(0, 0);
+      lcd.print("Wind tick:      ");
+      lcd.setCursor(11, 0);
+      lcd.print(tickCount);
+    }
 
-    if (tickCount >= WIND_TICK_THRESHOLD && !windAlarmActive)
-    {
+    if (tickCount >= WIND_TICK_THRESHOLD && !windAlarmActive) {
       windAlarmActive = true;
       alarmStartTime = currentMillis;
       retractAwningDueToAlarm();
-      sprintf(TempString, "{\"wind\": %u , \"state\": \"WIND ALARM\"}", tickCount);
-      client.publish(mqtt_topic_alarm, TempString);
-      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"WIND ALARM %u\"}", tickCount);
-      client.publish(mqtt_topic_log, TempString);
+      if (wifiConnected && client.connected()) {
+        sprintf(TempString, "{\"wind\": %u , \"state\": \"WIND ALARM\"}", tickCount);
+        client.publish(mqtt_topic_alarm, TempString);
+        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"WIND ALARM %u\"}", tickCount);
+        client.publish(mqtt_topic_log, TempString);
+      }
     }
-    if(MAXtickCount < tickCount && tickCount < 200)
-    {
+    if (MAXtickCount < tickCount && tickCount < 200) {
       MAXtickCount = tickCount;
     }
     tickCount = 0;
   }
 
-  // --- Wind alarm reset ---
-  if (windAlarmActive)
+  if(FirstStart && wifiConnected && client.connected())
   {
-    lcd.setCursor(0, 1);
-    lcd.print("Allarme!       ");
-    lcd.setCursor(9, 1);
-    lcd.print((ALARM_RESET_TIMEOUT / 1000) - ((unsigned long)((currentMillis - alarmStartTime) / 1000)));
-    actualPositionTime = 0;
-    if (currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT)
-    {
-      Serial.println("Wind alarm reset.");
+    FirstStart = false;
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"START BOARD\"}");
+    client.publish(mqtt_topic_log, TempString);
+  }
+
+  if(ReconnectionSuccess && wifiConnected && client.connected())
+  {
+    ReconnectionSuccess = false;
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ReconnectionSuccess\"}");
+    client.publish(mqtt_topic_log, TempString);
+  }
+
+  // --- Wind alarm reset ---
+  if (windAlarmActive) {
+    if (LCDPresent) {
       lcd.setCursor(0, 1);
-      lcd.print("Allarm reset   ");
+      lcd.print("Allarme!       ");
+      lcd.setCursor(9, 1);
+      lcd.print((ALARM_RESET_TIMEOUT / 1000) - ((unsigned long)((currentMillis - alarmStartTime) / 1000)));
+    }
+    actualPositionTime = 0;
+    if (currentMillis - alarmStartTime >= ALARM_RESET_TIMEOUT) {
+      Serial.println("Wind alarm reset.");
+      if (LCDPresent) {
+        lcd.setCursor(0, 1);
+        lcd.print("Allarm reset   ");
+      }
       raisingInProgress = false;
       windAlarmActive = false;
-    }
-    else
-    {
-      if (currentMillis - alarmStartTime >= ALARM_STOP_UP_TIMEOUT)
-      {
+    } else {
+      if (currentMillis - alarmStartTime >= ALARM_STOP_UP_TIMEOUT) {
         //Serial.println("Wind alarm stop UP.");
         raisingInProgress = false;
-      }
-      else
-      {
+      } else {
         raiseAwning();
       }
     }
   }
 
-  if (movingToTarget && !windAlarmActive)
-  {
-    if (isMovingDown)
-    {
-      if (actualPositionTime < targetMoveDuration)
-      {
+  if (movingToTarget && !windAlarmActive) {
+    if (isMovingDown) {
+      if (actualPositionTime < targetMoveDuration) {
         lowerAwning();
-      }
-      else
-      {
+      } else {
         stopAwning();
         movingToTarget = false;
         isMovingDown = false;
       }
-    }
-    else if (isMovingUp)
-    {
-      if (actualPositionTime > targetMoveDuration)
-      {
+    } else if (isMovingUp) {
+      if (actualPositionTime > targetMoveDuration) {
         raiseAwning();
-      }
-      else
-      {
+      } else {
         stopAwning();
         movingToTarget = false;
         isMovingUp = false;
@@ -635,74 +651,67 @@ void loop()
 
   // --- Button debounce logic ---
   bool readingUP = digitalRead(PIN_UP);
-  if (readingUP != lastButtonStateUP)
-  {
+  if (readingUP != lastButtonStateUP) {
     lastDebounceTimeUP = currentMillis;
   }
-  if ((currentMillis - lastDebounceTimeUP) > DEBOUNCE_DELAY)
-  {
-      if (readingUP == LOW && !windAlarmActive)
-      {
-        raiseAwning();
-      }
+  if ((currentMillis - lastDebounceTimeUP) > DEBOUNCE_DELAY) {
+    if (readingUP == LOW && !windAlarmActive) {
+      raiseAwning();
+    }
   }
   lastButtonStateUP = readingUP;
 
   bool readingDOWN = digitalRead(PIN_DOWN);
-  if (readingDOWN != lastButtonStateDOWN)
-  {
+  if (readingDOWN != lastButtonStateDOWN) {
     lastDebounceTimeDOWN = currentMillis;
   }
-  if ((currentMillis - lastDebounceTimeDOWN) > DEBOUNCE_DELAY)
-  {
-      if (readingDOWN == LOW && !windAlarmActive)
-      {
-        lowerAwning();
-      }
+  if ((currentMillis - lastDebounceTimeDOWN) > DEBOUNCE_DELAY) {
+    if (readingDOWN == LOW && !windAlarmActive) {
+      lowerAwning();
+    }
   }
   lastButtonStateDOWN = readingDOWN;
 
   // Stop motor if no button pressed and no automatic raise
-  if (readingUP == HIGH && readingDOWN == HIGH && !raisingInProgress && !movingToTarget)
-  {
+  if (readingUP == HIGH && readingDOWN == HIGH && !raisingInProgress && !movingToTarget) {
     stopAwning();
   }
 }
 
 // --- Relay logic updated to support double-deviator wiring ---
 
-void raiseAwning()
-{
+void raiseAwning() {
   Serial.println("UP.");
-  if (raisingInProgress == false)
-  {
-    lcd.setCursor(0, 1);
-    lcd.print("UP...       ");
+  if (raisingInProgress == false) {
+    if (LCDPresent) {
+      lcd.setCursor(0, 1);
+      lcd.print("UP...       ");
+    }
   }
-  digitalWrite(RELAY_DIRECTION, LOW); // Direction: UP
-  delay(100);                         // Small delay to settle relays
-  digitalWrite(RELAY_POWER, HIGH);    // Power ON
-  if(isCurrentZero() == false) actualPositionTime -= millis() - millisStop;
-  if(actualPositionTime > 655350 ) actualPositionTime = 0;
+  digitalWrite(RELAY_DIRECTION, LOW);  // Direction: UP
+  delay(100);                          // Small delay to settle relays
+  digitalWrite(RELAY_POWER, HIGH);     // Power ON
+  if (isCurrentZero() == false) actualPositionTime -= millis() - millisStop;
+  if (actualPositionTime > 655350) actualPositionTime = 0;
   millisStop = millis();
 }
 
-void lowerAwning()
-{
+void lowerAwning() {
   Serial.println("DOWN.");
-  lcd.setCursor(0, 1);
-  lcd.print("DOWN...      ");
-  digitalWrite(RELAY_DIRECTION, HIGH); // Direction: DOWN
+  if (LCDPresent) {
+    lcd.setCursor(0, 1);
+    lcd.print("DOWN...      ");
+  }
+  digitalWrite(RELAY_DIRECTION, HIGH);  // Direction: DOWN
   delay(100);
-  digitalWrite(RELAY_POWER, HIGH); // Power ON
-  if(isCurrentZero() == false) actualPositionTime += millis() - millisStop;
-  if(actualPositionTime > openDuration) 
+  digitalWrite(RELAY_POWER, HIGH);  // Power ON
+  if (isCurrentZero() == false) actualPositionTime += millis() - millisStop;
+  if (actualPositionTime > openDuration)
     actualPositionTime = openDuration;
   millisStop = millis();
 }
 
-void stopAwning()
-{
+void stopAwning() {
   millisStop = millis();
   digitalWrite(RELAY_POWER, LOW);
   delay(100);
@@ -710,55 +719,47 @@ void stopAwning()
   isMovingUp = false;
   isMovingDown = false;
   movingToTarget = false;
-  if (!windAlarmActive)
-  {
-    lcd.setCursor(0, 1);
-    lcd.print("Fermo           ");
+  if (!windAlarmActive) {
+    if (LCDPresent) {
+      lcd.setCursor(0, 1);
+      lcd.print("Fermo           ");
+    }
   }
 }
 
-void retractAwningDueToAlarm()
-{
+void retractAwningDueToAlarm() {
   Serial.println("Wind alarm! Retracting awning...");
   raisingInProgress = true;
 }
 
-void startLearning()
-{
+void startLearning() {
   LearningStateMachine = LEARNING_INIT;
 }
 
-void moveToPercentage(float percent)
-{
+void moveToPercentage(float percent) {
   if (percent < 0 || percent > 100 || openDuration == 0 || closeDuration == 0)
     return;
 
-  if (percent == 100)
-  {
+  if (percent == 100) {
     percent = 120;
   }
 
-  targetMoveDuration = (unsigned long)((float)openDuration * (percent*0.01));
+  targetMoveDuration = (unsigned long)((float)openDuration * (percent * 0.01));
 
-  if (targetMoveDuration > actualPositionTime)
-  {
+  if (targetMoveDuration > actualPositionTime) {
     isMovingDown = true;
     isMovingUp = false;
-  }
-  else if (targetMoveDuration < actualPositionTime)
-  {
+  } else if (targetMoveDuration < actualPositionTime) {
     isMovingUp = true;
     isMovingDown = false;
-  }
-  else
-  {
+  } else {
     isMovingUp = false;
     isMovingDown = false;
-    return; // already at position
+    return;  // already at position
   }
   Serial.println("moveToPercentage");
   Serial.println(targetMoveDuration);
-  
+
   sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"moveToPercentage %3.0f\"}", percent);
   client.publish(mqtt_topic_log, TempString);
   movingToTarget = true;
