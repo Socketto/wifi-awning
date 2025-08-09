@@ -4,8 +4,14 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include "Credentials.h"
+#include "time.h"
 
-//#define TestBoard
+#define TestBoard
+const char* timezone = "CET-1CEST,M3.5.0/2,M10.5.0/3";
+
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 3600;
+const int daylightOffset_sec = 3600;
 
 #ifndef TestBoard
 // --- WiFi & MQTT Configuration ---
@@ -45,6 +51,7 @@ const int ANEMO_PIN = 13;
 unsigned long currentNormal = 0;
 unsigned long currentRun = 0;
 unsigned long useCurrent = 0;
+int CounterWifiLost = 0;
 unsigned long CURRENT_THRESHOLD = 820;
 const unsigned long CURRENT_ZERO_DELAY = 500;
 volatile unsigned long ActualCurrent;
@@ -63,7 +70,11 @@ enum LearningState {
 LearningState LearningStateMachine = LEARNING_IDLE;
 
 // Wind sensor parameters
+#ifndef TestBoard
 volatile unsigned int tickCount = 256;
+#else
+volatile unsigned int tickCount = 0;
+#endif
 volatile unsigned int MAXtickCount = 0;
 unsigned long lastWindCheck = 0;
 const unsigned long WIND_CHECK_INTERVAL = 3000;
@@ -116,6 +127,23 @@ void IRAM_ATTR windSensorISR() {
     tickCount++;
     lastInterruptTime = currentTime;
   }
+}
+
+bool first_read_time = true;
+void CheckLocalTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return;
+  } else {
+    if (timeinfo.tm_hour == 19 && timeinfo.tm_min == 30 && windAlarmActive == false)
+    {
+        windAlarmActive = true;
+        alarmStartTime = currentMillis;
+        retractAwningDueToAlarm();
+    }
+  }
+  Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
 }
 
 bool devicePresent(byte address) {
@@ -326,12 +354,15 @@ void setup() {
     delay(1000);
     lcd.clear();
   }
+   
+  configTzTime(timezone, ntpServer);
+  CheckLocalTime();
 }
 
 void loop() {
   currentMillis = millis();
   ActualCurrent = readCurrent();
-
+  CheckLocalTime();
   if (ActualCurrent > (currentRun + (currentRun - currentNormal))) {
     AlarmConsuption = true;
   }
@@ -361,7 +392,7 @@ void loop() {
       wifiConnected = false;
     }
   }
-  // --- Check wifi every 10 seconds ---
+  // --- Check wifi every 30 seconds ---
   if (currentMillis - lastWifiCheck >= 30000) {
     lastWifiCheck = currentMillis;
 
@@ -369,22 +400,24 @@ void loop() {
       if (wifiConnected) {
         Serial.println("WiFi lost, reconnecting...");
         wifiConnected = false;
+
       } else {
         Serial.println("try WiFi reconnection...");
-        WiFi.begin(personalSSID, personalSSIDPWD);
+        Serial.println(CounterWifiLost);
+        WiFi.disconnect();
+        WiFi.reconnect(); 
+        CounterWifiLost++;
+        if(CounterWifiLost > 119) //30 mins
+        {
+          ESP.restart();
+        }
       }
-
-
-#ifndef TestBoard
-      WiFi.hostname("Esp32Awning1");
-#else
-      WiFi.hostname("Esp32AwningTest");
-#endif
     } else {
       if (!wifiConnected) {
         Serial.println("WiFi reconnected");
         wifiConnected = true;
       }
+      CounterWifiLost = 0;
     }
   }
 
@@ -409,8 +442,11 @@ void loop() {
       }
     }
     if (client.connected()) {
-      Serial.println("client.connected");
       client.loop();
+    }
+    else
+    {
+      Serial.println("client not connected");
     }
   }
 
