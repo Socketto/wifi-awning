@@ -6,7 +6,7 @@
 #include "Credentials.h"
 #include "time.h"
 
-#define TestBoard
+//#define TestBoard
 const char* timezone = "CET-1CEST,M3.5.0/2,M10.5.0/3";
 
 const char* ntpServer = "pool.ntp.org";
@@ -141,6 +141,8 @@ void CheckLocalTime() {
         windAlarmActive = true;
         alarmStartTime = currentMillis;
         retractAwningDueToAlarm();
+        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Close awning for the end of the day\"}");
+        client.publish(mqtt_topic_log, TempString);
     }
   }
   Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
@@ -424,7 +426,7 @@ void loop() {
   if (currentMillis - lastwindMQTTCheck >= 600000) {
     if (wifiConnected && client.connected()) {
       lastwindMQTTCheck = currentMillis;
-      sprintf(TempString, "{\"wind\": %u , \"WiFi_signal\" : %u}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()));
+      sprintf(TempString, "{\"wind\": %u , \"WiFi_signal\" : %u, \"position\" : %u}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()),(unsigned int)((float)((float)actualPositionTime/(float)openDuration) * 100));
       client.publish(mqtt_topic_state, TempString);
       sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"wind: %u , WiFi_signal : %u\"}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()));
       client.publish(mqtt_topic_log, TempString);
@@ -692,6 +694,7 @@ void loop() {
   }
   if ((currentMillis - lastDebounceTimeUP) > DEBOUNCE_DELAY) {
     if (readingUP == LOW && !windAlarmActive) {
+      movingToTarget = false;
       raiseAwning();
     }
   }
@@ -703,6 +706,7 @@ void loop() {
   }
   if ((currentMillis - lastDebounceTimeDOWN) > DEBOUNCE_DELAY) {
     if (readingDOWN == LOW && !windAlarmActive) {
+      movingToTarget = false;
       lowerAwning();
     }
   }
@@ -765,6 +769,8 @@ void stopAwning() {
 
 void retractAwningDueToAlarm() {
   Serial.println("Wind alarm! Retracting awning...");
+  targetMoveDuration = 0;
+  movingToTarget = false;
   raisingInProgress = true;
 }
 
