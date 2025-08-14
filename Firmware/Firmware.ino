@@ -379,6 +379,13 @@ void loop() {
     AlarmConsuption = true;
   }
 
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiConnected) {
+      Serial.println("WiFi lost, reconnecting...");
+      wifiConnected = false;
+    }
+  }
+  
   if (currentMillis - lastConsuptionCheck >= 500) {
     lastConsuptionCheck = currentMillis;
 
@@ -398,12 +405,7 @@ void loop() {
       PrecAlarmConsuption = false;
     }
   }
-  if (WiFi.status() != WL_CONNECTED) {
-    if (wifiConnected) {
-      Serial.println("WiFi lost, reconnecting...");
-      wifiConnected = false;
-    }
-  }
+
   // --- Check wifi every 30 seconds ---
   if (currentMillis - lastWifiCheck >= 30000) {
     lastWifiCheck = currentMillis;
