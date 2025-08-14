@@ -55,6 +55,7 @@ int CounterWifiLost = 0;
 unsigned long CURRENT_THRESHOLD = 820;
 const unsigned long CURRENT_ZERO_DELAY = 500;
 volatile unsigned long ActualCurrent;
+volatile bool UpdateState = false;
 bool movingToTarget = false;
 const int GREEN_LED = 27;
 const int RED_LED = 26;  // 25
@@ -106,6 +107,7 @@ unsigned long LASTopenDuration = 0;
 unsigned long LASTcloseDuration = 0;
 unsigned long targetMoveDuration = 0;
 unsigned long actualPositionTime = 0;
+volatile unsigned long DoNotRestart = 0;
 
 volatile unsigned long currentMillis = millis();
 volatile bool windAlarmActive = false;
@@ -141,7 +143,7 @@ void CheckLocalTime() {
         windAlarmActive = true;
         alarmStartTime = currentMillis;
         retractAwningDueToAlarm();
-        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Close awning for the end of the day\"}");
+        sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Auto close awning for the end of the day 19.30\"}");
         client.publish(mqtt_topic_log, TempString);
     }
   }
@@ -203,10 +205,12 @@ void callback(char *topic, byte *message, unsigned int length) {
     windAlarmActive = true;
     alarmStartTime = currentMillis;
     retractAwningDueToAlarm();
-    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Close awning for the end of the day\"}");
+    sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"Close awning for the end of the day from BOT\"}");
     client.publish(mqtt_topic_log, TempString);
   } else if (msg == "reboot") {
     ESP.restart();
+  } else if (msg == "state") {
+    UpdateState = true;
   } else if (msg == "current") {
     sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"ActualCurrent: %u\" }", ActualCurrent);
     client.publish(mqtt_topic_log, TempString);
@@ -344,6 +348,12 @@ void setup() {
   closeDuration = prefs.getULong("closeTime", 10);
   WIND_TICK_THRESHOLD = prefs.getULong("tickThreshold", 40);
 
+  DoNotRestart = prefs.getULong("DoNotRestart", 0);
+  if(DoNotRestart > 0 && DoNotRestart < 3)
+  {
+     tickCount = 0;
+  }
+
   prefs.end();
 
   Serial.println("Awning controller ready");
@@ -411,24 +421,36 @@ void loop() {
         CounterWifiLost++;
         if(CounterWifiLost > 119) //30 mins
         {
+          prefs.begin("awn", false);
+          DoNotRestart++;
+          prefs.putULong("DoNotRestart", DoNotRestart);
+          prefs.end();
           ESP.restart();
         }
       }
     } else {
       if (!wifiConnected) {
         Serial.println("WiFi reconnected");
+        if(DoNotRestart > 0)
+        {
+          prefs.begin("awn", false);
+          prefs.putULong("DoNotRestart", 0);
+          DoNotRestart = 0;
+          prefs.end();
+        }
         wifiConnected = true;
       }
       CounterWifiLost = 0;
     }
   }
 
-  if (currentMillis - lastwindMQTTCheck >= 600000) {
+  if (currentMillis - lastwindMQTTCheck >= 600000 || UpdateState) {
+    UpdateState = false;
     if (wifiConnected && client.connected()) {
       lastwindMQTTCheck = currentMillis;
       sprintf(TempString, "{\"wind\": %u , \"WiFi_signal\" : %u, \"position\" : %u}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()),(unsigned int)((float)((float)actualPositionTime/(float)openDuration) * 100));
       client.publish(mqtt_topic_state, TempString);
-      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"wind: %u , WiFi_signal : %u\"}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()));
+      sprintf(TempString, "{\"sender\": \"Awning1__\" , \"message\": \"wind: %u , WiFi_signal : %u, position : %u\"}", MAXtickCount, rssi_to_percentage(WiFi.RSSI()),(unsigned int)((float)((float)actualPositionTime/(float)openDuration) * 100));
       client.publish(mqtt_topic_log, TempString);
       MAXtickCount = 0;
     }
