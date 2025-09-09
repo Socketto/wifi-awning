@@ -310,8 +310,14 @@ bool isCurrentZero() {
 
 void setup() {
   Serial.begin(115200);
-  // Inizializza watchdog software a 30 secondi
-  esp_task_wdt_init(30, true); // 30 secondi, resetta su timeout
+  // Inizializza watchdog software a 30 secondi  // Configurazione watchdog software a 30 secondi
+  esp_task_wdt_config_t twdt_config = {
+      .timeout_ms = 30000,   // timeout in millisecondi
+      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, // tutte le CPU
+      .trigger_panic = true  // resetta su timeout
+  };
+
+  esp_task_wdt_init(&twdt_config);
   esp_task_wdt_add(NULL);      // Aggiungi il task corrente (loop)
 
 #ifdef TestBoard
