@@ -1,10 +1,12 @@
 #include <Wire.h>
+#include "esp_task_wdt.h"
 #include <LiquidCrystal_I2C.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include "Credentials.h"
 #include "time.h"
+#include "esp_task_wdt.h"
 
 //#define TestBoard
 const char* timezone = "CET-1CEST,M3.5.0/2,M10.5.0/3";
@@ -107,7 +109,6 @@ unsigned long LASTopenDuration = 0;
 unsigned long LASTcloseDuration = 0;
 unsigned long targetMoveDuration = 0;
 unsigned long actualPositionTime = 0;
-volatile unsigned long DoNotRestart = 0;
 
 volatile unsigned long currentMillis = millis();
 volatile bool windAlarmActive = false;
@@ -309,6 +310,9 @@ bool isCurrentZero() {
 
 void setup() {
   Serial.begin(115200);
+  // Inizializza watchdog software a 30 secondi
+  esp_task_wdt_init(30, true); // 30 secondi, resetta su timeout
+  esp_task_wdt_add(NULL);      // Aggiungi il task corrente (loop)
 
 #ifdef TestBoard
   Serial.println("TestBoard");
@@ -348,12 +352,6 @@ void setup() {
   closeDuration = prefs.getULong("closeTime", 10);
   WIND_TICK_THRESHOLD = prefs.getULong("tickThreshold", 40);
 
-  DoNotRestart = prefs.getULong("DoNotRestart", 0);
-  if(DoNotRestart > 0 && DoNotRestart < 3)
-  {
-     tickCount = 0;
-  }
-
   prefs.end();
 
   Serial.println("Awning controller ready");
@@ -372,6 +370,7 @@ void setup() {
 }
 
 void loop() {
+  esp_task_wdt_reset();
   currentMillis = millis();
   ActualCurrent = readCurrent();
   CheckLocalTime();
@@ -423,23 +422,12 @@ void loop() {
         CounterWifiLost++;
         if(CounterWifiLost > 119) //30 mins
         {
-          prefs.begin("awn", false);
-          DoNotRestart++;
-          prefs.putULong("DoNotRestart", DoNotRestart);
-          prefs.end();
           ESP.restart();
         }
       }
     } else {
       if (!wifiConnected) {
         Serial.println("WiFi reconnected");
-        if(DoNotRestart > 0)
-        {
-          prefs.begin("awn", false);
-          prefs.putULong("DoNotRestart", 0);
-          DoNotRestart = 0;
-          prefs.end();
-        }
         wifiConnected = true;
       }
       CounterWifiLost = 0;
